@@ -95,7 +95,8 @@ class MenuBarManager: NSObject {
                     let newSettings = ClaudeSettings(
                         organizationId: orgId,
                         sessionKey: sessionKey,
-                        autoTriggerQuota: false
+                        autoTriggerQuota: false,
+                        happyHourPeakWindow: .default
                     )
 
                     do {
@@ -276,10 +277,17 @@ class MenuBarManager: NSObject {
         button.image = image
 
         // Add percentage text as title
+        let baseTitle: String
         if let percentage = percentage {
-            button.title = " \(Int(percentage))%"
+            baseTitle = " \(Int(percentage))%"
         } else {
-            button.title = " --"
+            baseTitle = " --"
+        }
+
+        if let happyHourTitle = happyHourTitle() {
+            button.title = "\(baseTitle) \(happyHourTitle)"
+        } else {
+            button.title = baseTitle
         }
     }
 
@@ -309,6 +317,30 @@ class MenuBarManager: NSObject {
                 let lastUpdated = NSMenuItem(title: "Last updated: just now", action: nil, keyEquivalent: "")
                 lastUpdated.isEnabled = false
                 menu.addItem(lastUpdated)
+            }
+
+            if let happyHourStatus = currentHappyHourStatus(), happyHourStatus.isHappyHour {
+                menu.addItem(NSMenuItem.separator())
+
+                let happyHourItem = NSMenuItem(title: "Happy Hour Active", action: nil, keyEquivalent: "")
+                happyHourItem.isEnabled = false
+                menu.addItem(happyHourItem)
+
+                if let countdown = happyHourStatus.countdownText {
+                    let countdownItem = NSMenuItem(title: "Peak resumes in: \(countdown)", action: nil, keyEquivalent: "")
+                    countdownItem.isEnabled = false
+                    menu.addItem(countdownItem)
+                }
+
+                if let settings {
+                    let windowItem = NSMenuItem(
+                        title: "Peak window: \(settings.happyHourPeakWindow.start)-\(settings.happyHourPeakWindow.end) \(settings.happyHourPeakWindow.tz)",
+                        action: nil,
+                        keyEquivalent: ""
+                    )
+                    windowItem.isEnabled = false
+                    menu.addItem(windowItem)
+                }
             }
 
             menu.addItem(NSMenuItem.separator())
@@ -472,6 +504,20 @@ class MenuBarManager: NSObject {
     @objc private func quit() {
         Task { await logger.log("ClaudeMeter quitting", level: .info) }
         NSApplication.shared.terminate(nil)
+    }
+
+    private func currentHappyHourStatus() -> HappyHourStatus? {
+        settings?.happyHourPeakWindow.status()
+    }
+
+    private func happyHourTitle() -> String? {
+        guard let status = currentHappyHourStatus(),
+              status.isHappyHour,
+              let countdown = status.countdownText else {
+            return nil
+        }
+
+        return "✨ \(countdown)"
     }
 }
 

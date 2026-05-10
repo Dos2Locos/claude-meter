@@ -56,6 +56,14 @@ struct ClaudeSettings: Codable, Sendable {
     var organizationId: String
     var sessionKey: String
     var autoTriggerQuota: Bool
+    var happyHourPeakWindow: HappyHourPeakWindow
+
+    enum CodingKeys: String, CodingKey {
+        case organizationId
+        case sessionKey
+        case autoTriggerQuota
+        case happyHourPeakWindow
+    }
 
     static let settingsURL: URL = {
         let homeDirectory = FileManager.default.homeDirectoryForCurrentUser
@@ -64,31 +72,29 @@ struct ClaudeSettings: Codable, Sendable {
         return configDirectory.appendingPathComponent("settings.json")
     }()
 
-    init(organizationId: String, sessionKey: String, autoTriggerQuota: Bool = false) {
+    init(
+        organizationId: String,
+        sessionKey: String,
+        autoTriggerQuota: Bool = false,
+        happyHourPeakWindow: HappyHourPeakWindow = .default
+    ) {
         self.organizationId = organizationId
         self.sessionKey = sessionKey
         self.autoTriggerQuota = autoTriggerQuota
+        self.happyHourPeakWindow = happyHourPeakWindow
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        organizationId = try container.decode(String.self, forKey: .organizationId)
+        sessionKey = try container.decode(String.self, forKey: .sessionKey)
+        autoTriggerQuota = try container.decodeIfPresent(Bool.self, forKey: .autoTriggerQuota) ?? false
+        happyHourPeakWindow = try container.decodeIfPresent(HappyHourPeakWindow.self, forKey: .happyHourPeakWindow) ?? .default
     }
 
     static func load() -> ClaudeSettings? {
         guard let data = try? Data(contentsOf: settingsURL) else { return nil }
-
-        // Handle legacy settings without autoTriggerQuota field
-        if let settings = try? JSONDecoder().decode(ClaudeSettings.self, from: data) {
-            return settings
-        }
-
-        // Try to decode without the new field
-        struct LegacySettings: Codable {
-            var organizationId: String
-            var sessionKey: String
-        }
-
-        if let legacy = try? JSONDecoder().decode(LegacySettings.self, from: data) {
-            return ClaudeSettings(organizationId: legacy.organizationId, sessionKey: legacy.sessionKey)
-        }
-
-        return nil
+        return try? JSONDecoder().decode(ClaudeSettings.self, from: data)
     }
 
     func save() throws {
