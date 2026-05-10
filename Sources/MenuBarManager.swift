@@ -7,6 +7,7 @@ class MenuBarManager: NSObject {
     private let button: NSStatusBarButton
     private var menu: NSMenu!
     private var usageData: UsageResponse?
+    private var lastUpdatedAt: Date?
     private var refreshTask: Task<Void, Never>?
     private var apiClient: ClaudeAPIClient?
     private var settings: ClaudeSettings?
@@ -180,6 +181,7 @@ class MenuBarManager: NSObject {
 
         do {
             usageData = try await apiClient.fetchUsage()
+            lastUpdatedAt = Date()
 
             // Check for null state (quota period expired) and auto-trigger if enabled
             if let settings = settings, settings.autoTriggerQuota {
@@ -295,52 +297,45 @@ class MenuBarManager: NSObject {
         menu.removeAllItems()
 
         if let usage = usageData, settings != nil {
-            // Current session section
-            if let fiveHour = usage.fiveHour {
-                let headerItem = NSMenuItem(title: "Claude Usage", action: nil, keyEquivalent: "")
-                headerItem.isEnabled = false
-                menu.addItem(headerItem)
+            let headerItem = NSMenuItem(title: "Claude Usage", action: nil, keyEquivalent: "")
+            headerItem.isEnabled = false
+            menu.addItem(headerItem)
 
-                menu.addItem(NSMenuItem.separator())
-
-                let percentageItem = NSMenuItem(title: "Current Session: \(Int(fiveHour.utilization))% used", action: nil, keyEquivalent: "")
-                percentageItem.isEnabled = false
-                menu.addItem(percentageItem)
-
-                // Only show reset time if it's available
-                if fiveHour.resetsAt != nil {
-                    let resetItem = NSMenuItem(title: "Resets in: \(fiveHour.timeUntilReset)", action: nil, keyEquivalent: "")
-                    resetItem.isEnabled = false
-                    menu.addItem(resetItem)
-                }
-
-                let lastUpdated = NSMenuItem(title: "Last updated: just now", action: nil, keyEquivalent: "")
+            if let updatedText = lastUpdatedText() {
+                let lastUpdated = NSMenuItem(title: updatedText, action: nil, keyEquivalent: "")
                 lastUpdated.isEnabled = false
                 menu.addItem(lastUpdated)
             }
 
-            if let happyHourStatus = currentHappyHourStatus(), happyHourStatus.isHappyHour {
+            let usageMetrics = usageMenuMetrics(from: usage)
+            let peakMetric = peakWindowMenuMetric()
+
+            if !usageMetrics.isEmpty || peakMetric != nil {
                 menu.addItem(NSMenuItem.separator())
+            }
 
-                let happyHourItem = NSMenuItem(title: "Happy Hour Active", action: nil, keyEquivalent: "")
-                happyHourItem.isEnabled = false
-                menu.addItem(happyHourItem)
+            for metric in usageMetrics {
+                menu.addItem(makeProgressMenuItem(
+                    title: metric.title,
+                    value: metric.value,
+                    detail: metric.detail,
+                    secondaryDetail: metric.secondaryDetail,
+                    accentColor: metric.accentColor
+                ))
+            }
 
-                if let countdown = happyHourStatus.countdownText {
-                    let countdownItem = NSMenuItem(title: "Peak resumes in: \(countdown)", action: nil, keyEquivalent: "")
-                    countdownItem.isEnabled = false
-                    menu.addItem(countdownItem)
+            if let peakMetric {
+                if !usageMetrics.isEmpty {
+                    menu.addItem(NSMenuItem.separator())
                 }
 
-                if let settings {
-                    let windowItem = NSMenuItem(
-                        title: "Peak window: \(settings.happyHourPeakWindow.start)-\(settings.happyHourPeakWindow.end) \(settings.happyHourPeakWindow.tz)",
-                        action: nil,
-                        keyEquivalent: ""
-                    )
-                    windowItem.isEnabled = false
-                    menu.addItem(windowItem)
-                }
+                menu.addItem(makeProgressMenuItem(
+                    title: peakMetric.title,
+                    value: peakMetric.value,
+                    detail: peakMetric.detail,
+                    secondaryDetail: peakMetric.secondaryDetail,
+                    accentColor: peakMetric.accentColor
+                ))
             }
 
             menu.addItem(NSMenuItem.separator())
@@ -510,6 +505,100 @@ class MenuBarManager: NSObject {
         settings?.happyHourPeakWindow.status()
     }
 
+    private func usageMenuMetrics(from usage: UsageResponse) -> [MenuProgressMetric] {
+        [
+            metric(title: "5h Window", period: usage.fiveHour),
+            metric(title: "7d Window", period: usage.sevenDay),
+            metric(title: "7d OAuth Apps", period: usage.sevenDayOauthApps),
+            metric(title: "7d Opus", period: usage.sevenDayOpus),
+            metric(title: "Iguana Necktie", period: usage.iguanaNecktie)
+        ].compactMap { $0 }
+    }
+
+    private func metric(title: String, period: UsagePeriod?) -> MenuProgressMetric? {
+        guard let period else { return nil }
+
+        let detail: String
+        if period.resetsAt != nil {
+            detail = "\(Int(period.utilization))% used • resets in \(period.timeUntilReset)"
+        } else {
+            detail = "\(Int(period.utilization))% used • waiting for next reset"
+        }
+
+        return MenuProgressMetric(
+            title: title,
+            value: period.utilization / 100.0,
+            detail: detail,
+            secondaryDetail: nil,
+            accentColor: progressColor(for: period.utilization / 100.0)
+        )
+    }
+
+    private func peakWindowMenuMetric() -> MenuProgressMetric? {
+        guard let settings else { return nil }
+
+        let status = settings.happyHourPeakWindow.status()
+        let progress = peakWindowProgress(for: settings.happyHourPeakWindow)
+        let stateLabel = status.isHappyHour ? "Happy hour" : "Peak active"
+        let timeZoneLabel = settings.happyHourPeakWindow.timeZone.abbreviation() ?? settings.happyHourPeakWindow.tz
+        let schedule = "\(settings.happyHourPeakWindow.start)-\(settings.happyHourPeakWindow.end) \(timeZoneLabel)"
+
+        let detail: String
+        if status.isHappyHour, let countdown = status.countdownText {
+            detail = "\(stateLabel) • peak resumes in \(countdown)"
+        } else {
+            detail = stateLabel
+        }
+
+        return MenuProgressMetric(
+            title: "Peak Window",
+            value: progress,
+            detail: detail,
+            secondaryDetail: schedule,
+            accentColor: status.isHappyHour ? .systemBlue : .systemOrange
+        )
+    }
+
+    private func peakWindowProgress(for window: HappyHourPeakWindow, at date: Date = Date()) -> Double {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = window.timeZone
+
+        let weekday = calendar.component(.weekday, from: date) - 1
+        guard window.days.contains(weekday) else {
+            return 0
+        }
+
+        let totalMinutes = max(window.endMinutes - window.startMinutes, 1)
+        let currentMinutes = (calendar.component(.hour, from: date) * 60) + calendar.component(.minute, from: date)
+        let elapsed = min(max(currentMinutes - window.startMinutes, 0), totalMinutes)
+        return Double(elapsed) / Double(totalMinutes)
+    }
+
+    private func progressColor(for value: Double) -> NSColor {
+        if value < 0.5 {
+            return .systemGreen
+        } else if value < 0.8 {
+            return .systemYellow
+        } else {
+            return .systemRed
+        }
+    }
+
+    private func lastUpdatedText(now: Date = Date()) -> String? {
+        guard let lastUpdatedAt else { return nil }
+
+        let interval = max(0, Int(now.timeIntervalSince(lastUpdatedAt)))
+        if interval < 5 {
+            return "Last updated: just now"
+        }
+        if interval < 60 {
+            return "Last updated: \(interval)s ago"
+        }
+
+        let minutes = interval / 60
+        return "Last updated: \(minutes)m ago"
+    }
+
     private func happyHourTitle() -> String? {
         guard let status = currentHappyHourStatus(),
               status.isHappyHour,
@@ -527,5 +616,148 @@ extension MenuBarManager: NSMenuDelegate {
         // The menu is already up-to-date from the periodic refresh
         // Only log for debugging purposes
         Task { await logger.log("Menu opened", level: .debug) }
+    }
+}
+
+private struct MenuProgressMetric {
+    let title: String
+    let value: Double
+    let detail: String
+    let secondaryDetail: String?
+    let accentColor: NSColor
+}
+
+private extension MenuBarManager {
+    func makeProgressMenuItem(title: String, value: Double, detail: String, secondaryDetail: String?, accentColor: NSColor) -> NSMenuItem {
+        let item = NSMenuItem()
+        item.view = MenuProgressItemView(
+            frame: NSRect(x: 0, y: 0, width: 320, height: secondaryDetail == nil ? 76 : 92),
+            title: title,
+            value: value,
+            detail: detail,
+            secondaryDetail: secondaryDetail,
+            accentColor: accentColor
+        )
+        return item
+    }
+}
+
+private final class MenuProgressItemView: NSView {
+    private let preferredHeight: CGFloat
+
+    init(frame frameRect: NSRect, title: String, value: Double, detail: String, secondaryDetail: String?, accentColor: NSColor) {
+        self.preferredHeight = frameRect.height
+        super.init(frame: frameRect)
+
+        let clampedValue = min(max(value, 0), 1)
+
+        let titleField = NSTextField(labelWithString: title)
+        titleField.font = .systemFont(ofSize: 12, weight: .semibold)
+        titleField.textColor = .labelColor
+        titleField.lineBreakMode = .byTruncatingTail
+
+        let detailField = NSTextField(labelWithString: detail)
+        detailField.font = .systemFont(ofSize: 11)
+        detailField.textColor = .secondaryLabelColor
+        detailField.lineBreakMode = .byWordWrapping
+        detailField.maximumNumberOfLines = 2
+        detailField.cell?.wraps = true
+        detailField.setContentCompressionResistancePriority(.required, for: .vertical)
+        detailField.setContentHuggingPriority(.required, for: .vertical)
+        titleField.setContentCompressionResistancePriority(.required, for: .vertical)
+        titleField.setContentHuggingPriority(.required, for: .vertical)
+
+        let secondaryDetailField: NSTextField?
+        if let secondaryDetail {
+            let field = NSTextField(labelWithString: secondaryDetail)
+            field.font = .systemFont(ofSize: 11)
+            field.textColor = .secondaryLabelColor
+            field.lineBreakMode = .byTruncatingTail
+            field.maximumNumberOfLines = 1
+            secondaryDetailField = field
+        } else {
+            secondaryDetailField = nil
+        }
+
+        let progressIndicator = MenuProgressBarView(
+            frame: NSRect(x: 0, y: 0, width: 0, height: 8),
+            value: clampedValue,
+            accentColor: accentColor
+        )
+        progressIndicator.translatesAutoresizingMaskIntoConstraints = false
+
+        var arrangedSubviews: [NSView] = [titleField, progressIndicator, detailField]
+        if let secondaryDetailField {
+            arrangedSubviews.append(secondaryDetailField)
+        }
+
+        let stack = NSStackView(views: arrangedSubviews)
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 4
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
+            progressIndicator.heightAnchor.constraint(equalToConstant: 8),
+            progressIndicator.widthAnchor.constraint(equalTo: stack.widthAnchor)
+        ])
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: 320, height: preferredHeight)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+}
+
+private final class MenuProgressBarView: NSView {
+    private let value: Double
+    private let accentColor: NSColor
+
+    init(frame frameRect: NSRect, value: Double, accentColor: NSColor) {
+        self.value = value
+        self.accentColor = accentColor
+        super.init(frame: frameRect)
+        wantsLayer = true
+    }
+
+    override func layout() {
+        super.layout()
+
+        guard let layer else { return }
+        layer.backgroundColor = NSColor.quaternaryLabelColor.withAlphaComponent(0.16).cgColor
+        layer.cornerRadius = bounds.height / 2
+        layer.masksToBounds = true
+
+        let fillLayer: CALayer
+        if let existing = layer.sublayers?.first {
+            fillLayer = existing
+        } else {
+            fillLayer = CALayer()
+            layer.addSublayer(fillLayer)
+        }
+
+        fillLayer.backgroundColor = accentColor.cgColor
+        fillLayer.cornerRadius = bounds.height / 2
+        fillLayer.frame = NSRect(
+            x: 0,
+            y: 0,
+            width: bounds.width * value,
+            height: bounds.height
+        )
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
     }
 }
